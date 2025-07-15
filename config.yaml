@@ -1,0 +1,18 @@
+# config.yaml
+job_titles:
+  - Product Manager
+  - Project Manager
+sector_keywords:
+  - SaaS
+  - Fintech
+  - Edutech
+location: Remote
+search_region: "Anywhere"
+apply_limit: 1000
+
+# make sure this list is NOT empty
+platforms_to_scrape:
+  - linkedin
+  - indeed
+  - wellfound
+  - remoteok

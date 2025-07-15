@@ -1,0 +1,1 @@
+# Job data structure and helper methods
