@@ -1,87 +1,121 @@
-# src/platforms/linkedin.py
-import time
-import urllib.parse
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+# main.py
+import os
+import yaml
+from pathlib import Path
+from dotenv import load_dotenv
 from src.logging import logger
+from src.job_application import apply_to_job
+from src.job_application_saver import save_application_details
+from src.platforms.linkedin import search_linkedin_jobs
+from src.platforms.indeed import search_indeed_jobs
+from src.platforms.wellfound import search_wellfound_jobs
+from src.platforms.remoteok import search_remoteok_jobs
+from src.resume_builder import generate_resume
+from src.cover_letter_builder import generate_cover_letter
+import re
 
-def search_linkedin_jobs(query, location, credentials):
-    logger.info(f"🚀 Starting LinkedIn search for: '{query}'")
-    options = Options()
-    options.add_argument("--headless=new")
-    driver = webdriver.Chrome(options=options)
-    scraped_jobs = []
+PLATFORM_SEARCH_FUNCTIONS = {
+    "linkedin": search_linkedin_jobs,
+    "indeed": search_indeed_jobs,
+    "wellfound": search_wellfound_jobs,
+    "remoteok": search_remoteok_jobs,
+}
 
-    try:
-        driver.get("https://www.linkedin.com/login")
-        time.sleep(3)
-        driver.find_element(By.ID, "username").send_keys(credentials["LINKEDIN_USER"])
-        driver.find_element(By.ID, "password").send_keys(credentials["LINKEDIN_PASSWORD"])
-        driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        time.sleep(5)
-        logger.info("🔐 Logged into LinkedIn successfully for search.")
+def load_config():
+    with open("config.yaml", 'r') as f:
+        return yaml.safe_load(f)
 
-        encoded_query = urllib.parse.quote_plus(query)
-        search_url = f"https://www.linkedin.com/jobs/search/?keywords={encoded_query}&location={location}&f_WT=2&f_LF=f_AL&sortBy=R"
-        driver.get(search_url)
+def load_credentials():
+    load_dotenv()
+    return {
+        key: os.getenv(key) for key in [
+            "OPENAI_API_KEY", "LINKEDIN_USER", "LINKEDIN_PASSWORD",
+            "WELLFOUND_USER", "WELLFOUND_PASSWORD",
+            "APPLICANT_FULL_NAME", "APPLICANT_PHONE", "APPLICANT_ADDRESS",
+            "APPLICANT_LINKEDIN_PROFILE", "APPLICANT_WEBSITE"
+        ]
+    }
 
-        if "/checkpoint/" in driver.current_url:
-            raise Exception("LinkedIn is asking for a security check (CAPTCHA).")
+def sanitize_filename(name):
+    """Removes characters from a string that are not safe for filenames."""
+    return re.sub(r'[\\/*?:"<>|]', "", name)
 
-        wait = WebDriverWait(driver, 20)
-        job_card_selector = "div.job-search-card"
-        wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, job_card_selector)))
-        
-        time.sleep(2)
-        job_cards = driver.find_elements(By.CSS_SELECTOR, job_card_selector)
-        
-        for card in job_cards:
-            try:
-                title_element = card.find_element(By.CSS_SELECTOR, "h3.base-search-card__title")
-                company_element = card.find_element(By.CSS_SELECTOR, "h4.base-search-card__subtitle")
-                url_element = card.find_element(By.CSS_SELECTOR, "a.base-card__full-link")
-                title = title_element.text
-                company = company_element.text
-                job_url = url_element.get_attribute("href").split('?')[0]
-                
-                if title and company and job_url:
-                    scraped_jobs.append({"title": title, "company": company, "location": location, "url": job_url, "source": "linkedin", "description": f"Job for {title} at {company}"})
-            except NoSuchElementException:
-                continue
-    except Exception as e:
-        logger.error(f"❌ An error occurred during LinkedIn search: {e}")
-    finally:
-        driver.quit()
-    logger.info(f"✅ Found {len(scraped_jobs)} unique jobs from LinkedIn for query: '{query}'")
-    return scraped_jobs
+def main():
+    config = load_config()
+    credentials = load_credentials()
+    logger.info("✅ Loaded configuration and credentials.")
 
-def apply_to_linkedin_job(driver, job_data, credentials, resume_path, cover_letter_text):
-    driver.get(job_data['url'])
-    wait = WebDriverWait(driver, 15)
+    apply_limit = config.get('apply_limit', 5)
+    applied_count = 0
+
+    job_titles = config.get('job_titles', [])
+    sector_keywords = config.get('sector_keywords', [])
+    location = config.get('location', 'Remote')
+    region = config.get('search_region', '')
+    platforms = config.get('platforms_to_scrape', [])
     
-    try:
-        easy_apply_button_xpath = "//button[contains(@class, 'jobs-apply-button')]"
-        easy_apply_button = wait.until(EC.element_to_be_clickable((By.XPATH, easy_apply_button_xpath)))
-        easy_apply_button.click()
-        time.sleep(2)
-    except TimeoutException:
-        raise Exception("Not an 'Easy Apply' job (button did not load).")
+    resume_template_path = Path("resume_template.txt")
+    if not resume_template_path.exists():
+        logger.error("❌ resume_template.txt not found! It is required for AI generation.")
+        return
+    resume_template = resume_template_path.read_text()
+    
+    output_dir = Path("generated_documents")
+    output_dir.mkdir(exist_ok=True)
 
-    while True:
-        try:
-            submit_button = driver.find_element(By.XPATH, "//button[@aria-label='Submit application']")
-            # submit_button.click() # UNCOMMENT TO SUBMIT
-            logger.warning("LinkedIn Apply: Submit button found but not clicked.")
-            time.sleep(2)
-            return
-        except NoSuchElementException:
-            try:
-                next_button = driver.find_element(By.XPATH, "//button[@aria-label='Continue to next step']")
-                next_button.click()
-                time.sleep(2)
-            except NoSuchElementException:
-                raise Exception("Could not find Next or Submit button.")
+    for platform in platforms:
+        if applied_count >= apply_limit: break
+        if platform not in PLATFORM_SEARCH_FUNCTIONS: continue
+        
+        search_func = PLATFORM_SEARCH_FUNCTIONS[platform]
+        search_queries = {f"{title} {keyword}" for title in job_titles for keyword in sector_keywords}
+        
+        for query in search_queries:
+            if applied_count >= apply_limit:
+                logger.info(f"🏁 Reached application limit of {apply_limit}. Stopping all searches.")
+                break
+
+            full_query = f"{query} in {region}"
+            found_jobs = search_func(full_query, location, credentials)
+
+            if not found_jobs: continue
+
+            logger.info(f"✅ Found {len(found_jobs)} jobs from {platform}. Starting application process...")
+            
+            for job in found_jobs:
+                if applied_count >= apply_limit: break
+
+                try:
+                    logger.info(f"\n--- Processing job: {job.get('title')} at {job.get('company')} ---")
+                    job_description = job.get("description", "No description available.")
+                    
+                    logger.info(f"🤖 Generating tailored resume and cover letter...")
+                    resume_text = generate_resume(credentials["OPENAI_API_KEY"], job_description, resume_template)
+                    cover_letter_text = generate_cover_letter(credentials["OPENAI_API_KEY"], job_description, "Please write a compelling cover letter based on my resume and the job description.")
+                    
+                    sanitized_company = sanitize_filename(job.get('company', 'UnknownCompany'))
+                    sanitized_title = sanitize_filename(job.get('title', 'UnknownTitle'))
+                    base_filename = f"{sanitized_company}_{sanitized_title}"
+
+                    resume_filename = output_dir / f"{base_filename}_Resume.txt"
+                    cover_letter_filename = output_dir / f"{base_filename}_CoverLetter.txt"
+
+                    with open(resume_filename, "w", encoding="utf-8") as f: f.write(resume_text)
+                    logger.info(f"📄 Saved resume to {resume_filename}")
+
+                    with open(cover_letter_filename, "w", encoding="utf-8") as f: f.write(cover_letter_text)
+                    logger.info(f"📄 Saved cover letter to {cover_letter_filename}")
+
+                    status = apply_to_job(job, credentials, resume_text, cover_letter_text)
+                    save_application_details(job, status)
+
+                    if "SUCCESS" in status:
+                        applied_count += 1
+                except Exception as e:
+                    logger.error(f"❌ A critical error occurred for {job.get('title')}: {e}")
+                    save_application_details(job, f"CRITICAL_FAILURE: {e}")
+
+    logger.info(f"\n🎯 Job application session completed. Processed {applied_count} applications.")
+
+if __name__ == "__main__":
+    main()
