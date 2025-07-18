@@ -1,0 +1,19 @@
+# Environment variables
+.env
+.env.save
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment folder
+venv/
+.venv/
+
+# Log files and generated documents
+*.csv
+generated_documents/
+temp_resume.txt
+
+# macOS specific files
+.DS_Store
